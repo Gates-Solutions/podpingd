@@ -48,6 +48,7 @@ pub(crate) async fn get_current_block_num() -> Result<u64, Report> {
 }
 
 pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Result<(), Report> {
+    // TODO: Set a configurable RPC server, and ideally a list of RPC servers to rotate
     let mut client = HttpClient::builder().build("https://rpc.podping.org")?;
 
     let mut block_num = start_block;
