@@ -1,0 +1,20 @@
+[package]
+name = "podpingd"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+color-eyre = "0.6.3"
+config = { version = "0.14.0", features = ["toml"] }
+jsonrpsee = { version = "0.24.3", features = ["jsonrpsee-core", "jsonrpsee-http-client", "jsonrpsee-proc-macros", "tokio", "tracing"] }
+minreq = { version = "2.12.0", features = ["json-using-serde", "https"] }
+podping-schemas = { git = "https://github.com/Podcastindex-org/podping-schemas-rust.git", tag = "v1.0.0" }
+serde = { version = "1.0.210", features = ["derive"] }
+thiserror = "1.0.63"
+tokio = { version = "1.40.0", features = ["full"] }
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["json"] }
+serde_json = "1.0.128"
+chrono = { version = "0.4.38", features = ["serde"] }
+serde_with = { version = "3.9.0", features = ["chrono", "json"] }
+regex = "1.10.6"
