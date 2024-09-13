@@ -31,7 +31,6 @@ const FIRST_PODPING_BLOCK: u64 = 53_691_004;
 const LAST_UPDATED_BLOCK_FILENAME: &str = "last_updated_block";
 
 async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: PathBuf) -> Result<(), Report> {
-    // TODO: Make output directory configurable
     let last_block_file_path = data_dir_path.join(LAST_UPDATED_BLOCK_FILENAME);
 
     loop {
