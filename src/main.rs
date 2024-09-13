@@ -72,10 +72,11 @@ async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: 
                                 | Podping::V02(_)
                                 | Podping::V03(_)
                                 | Podping::V10(_) => current_block_dir
-                                    .join(format!("{}_{}.json", tx.tx_id, i)),
+                                    .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
                                 Podping::V11(pp) => current_block_dir
                                     .join(format!(
-                                        "{}_{}_{}.json",
+                                        "{}_{}_{}_{}.json",
+                                        block.block_num,
                                         tx.tx_id,
                                         pp.session_id.to_string(),
                                         pp.timestamp_ns.to_string())
