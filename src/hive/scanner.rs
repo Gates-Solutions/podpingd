@@ -38,13 +38,13 @@ pub(crate) struct HiveTransactionWithTxId {
     pub(crate) podpings: Vec<Podping>,
 }
 
-pub(crate) async fn get_current_block_num() -> Result<u64, Report> {
+pub(crate) async fn get_dynamic_global_properties() -> Result<GetDynamicGlobalPropertiesResponse, Report> {
     let client = HttpClient::builder().build("https://rpc.podping.org")?;
 
     let response: Result<GetDynamicGlobalPropertiesResponse, _> = condenser_api::get_dynamic_global_properties(&client).await;
     trace!("condenser_api::get_dynamic_global_properties response: {:?}", response);
 
-    Ok(response?.head_block_number)
+    Ok(response?)
 }
 
 pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Result<(), Report> {

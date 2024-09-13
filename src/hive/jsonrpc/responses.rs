@@ -15,12 +15,6 @@ use serde::Deserialize;
 use chrono::{DateTime, Utc};
 use podping_schemas::org::podcastindex::podping::podping_json::Podping;
 
-#[derive(Deserialize, Debug)]
-pub(crate) struct GetDynamicGlobalPropertiesResponse {
-    // There are a lot more fields, but this is all we care about
-    pub(crate) head_block_number: u64,
-}
-
 // chrono doesn't appear to support ISO8601 without timezone offsets
 // https://github.com/chronotope/chrono/issues/587
 // Example from https://serde.rs/custom-date-format.html
@@ -71,6 +65,14 @@ pub(crate) mod json_string {
             _ => Ok(None)
         }
     }
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct GetDynamicGlobalPropertiesResponse {
+    // There are a lot more fields, but this is all we care about
+    pub(crate) head_block_number: u64,
+    #[serde(with = "hive_datetime_format")]
+    pub(crate) time: DateTime<Utc>,
 }
 
 #[derive(Deserialize, Debug)]

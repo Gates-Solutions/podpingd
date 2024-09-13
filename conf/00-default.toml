@@ -1,1 +1,14 @@
 debug = false
+data_directory = "./data"
+
+[scanner]
+# If both start_block and start_datetime are set, start_block takes precedence
+# If {{data_directory}}/last_updated_block exists, both of these values are ignored
+# If none of the above, default to the current block
+
+# This is the first Podping block as an example
+# You probably don't need to go back this far
+#start_block = 53691004
+
+# ISO-8601 datetime of approximately when to start
+start_datetime = 2024-09-13T00:00:00Z

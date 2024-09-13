@@ -9,7 +9,7 @@
  *
  *     You should have received a copy of the GNU Lesser General Public License along with podpingd. If not, see <https://www.gnu.org/licenses/>.
  */
-
+use chrono::{DateTime, Utc};
 use config::{Config, File};
 use serde::Deserialize;
 
@@ -17,10 +17,20 @@ pub(crate) const CARGO_PKG_VERSION: Option<&'static str> = option_env!("CARGO_PK
 
 
 #[derive(Debug, Deserialize)]
+pub struct Scanner {
+    pub(crate) start_block: Option<u64>,
+    pub(crate) start_datetime: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
 #[allow(unused)]
 pub struct Settings {
     pub(crate) debug: bool,
+    pub(crate) data_directory: String,
+    pub(crate) scanner: Scanner,
 }
+
+
 
 pub(crate) fn load_config() -> Settings {
     let config = Config::builder()
