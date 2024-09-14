@@ -11,4 +11,4 @@ data_directory = "./data"
 #start_block = 53691004
 
 # ISO-8601 datetime of approximately when to start
-start_datetime = 2024-09-13T00:00:00Z
+#start_datetime = 2024-09-13T00:00:00Z
