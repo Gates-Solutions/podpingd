@@ -20,7 +20,7 @@ use color_eyre::Report;
 use podping_schemas::org::podcastindex::podping::podping_json::Podping;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
-use tracing::{debug, info, warn, Level};
+use tracing::{debug, error, info, warn, Level};
 use hive::scanner;
 use crate::config::{Settings, CARGO_PKG_VERSION};
 use crate::hive::jsonrpc::responses::GetDynamicGlobalPropertiesResponse;
@@ -31,6 +31,7 @@ const FIRST_PODPING_BLOCK: u64 = 53_691_004;
 const LAST_UPDATED_BLOCK_FILENAME: &str = "last_updated_block";
 
 async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: PathBuf) -> Result<(), Report> {
+    // TODO: Make output directory configurable
     let last_block_file_path = data_dir_path.join(LAST_UPDATED_BLOCK_FILENAME);
 
     loop {
@@ -60,35 +61,52 @@ async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: 
                         .join(block.timestamp.minute().to_string())
                         .join(block.timestamp.second().to_string());
 
-                    std::fs::create_dir_all(&current_block_dir).unwrap_or(());
+                    let create_dir_future = tokio::fs::create_dir_all(&current_block_dir);
 
-                    for tx in block.transactions {
-                        for (i, podping) in tx.podpings.iter().enumerate() {
-                            let json = serde_json::to_string(&podping)?;
-                            info!("block: {}, tx: {}, podping: {}", block.block_num, tx.tx_id, json);
+                    let podping_write_futures = block.transactions.iter()
+                        .flat_map(|tx| {
+                            return tx.podpings.iter()
+                                .enumerate()
+                                .filter_map(|(i, podping)| {
+                                    let podping_file = match podping {
+                                        Podping::V0(_)
+                                        | Podping::V02(_)
+                                        | Podping::V03(_)
+                                        | Podping::V10(_) => current_block_dir
+                                            .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
+                                        Podping::V11(pp) => current_block_dir
+                                            .join(format!(
+                                                "{}_{}_{}_{}.json",
+                                                block.block_num,
+                                                tx.tx_id,
+                                                pp.session_id.to_string(),
+                                                pp.timestamp_ns.to_string())
+                                            ),
+                                    };
 
-                            let file = match podping {
-                                Podping::V0(_)
-                                | Podping::V02(_)
-                                | Podping::V03(_)
-                                | Podping::V10(_) => current_block_dir
-                                    .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
-                                Podping::V11(pp) => current_block_dir
-                                    .join(format!(
-                                        "{}_{}_{}_{}.json",
-                                        block.block_num,
-                                        tx.tx_id,
-                                        pp.session_id.to_string(),
-                                        pp.timestamp_ns.to_string())
-                                    ),
-                            };
-                            info!("Writing podping to file: {}", file.to_string_lossy());
-                            std::fs::write(file, json)?;
-                        }
-                    }
+                                    let json = serde_json::to_string(&podping);
+
+                                    match json {
+                                        Ok(json) => {
+                                            info!("block: {}, tx: {}, podping: {}", block.block_num, tx.tx_id, json);
+
+                                            info!("Writing podping to file: {}", podping_file.to_string_lossy());
+                                            Some(tokio::fs::write(podping_file, json))
+                                        }
+                                        Err(e) => {
+                                            error!("Error writing podping file {}: {}", podping_file.to_string_lossy(), e);
+                                            None
+                                        }
+                                    }
+                                }).collect::<Vec<_>>();
+                        }).collect::<Vec<_>>();
+
+                    create_dir_future.await?;
+
+                    futures::future::join_all(podping_write_futures).await;
                 }
 
-                std::fs::write(&last_block_file_path, block.block_num.to_string())?;
+                tokio::fs::write(&last_block_file_path, block.block_num.to_string()).await?;
             }
             None => {}
         }
@@ -97,7 +115,7 @@ async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: 
 
 async fn get_start_block_from_global_properties(
     start_datetime: Option<DateTime<Utc>>,
-    dynamic_global_properties: &GetDynamicGlobalPropertiesResponse
+    dynamic_global_properties: &GetDynamicGlobalPropertiesResponse,
 ) -> Result<u64, Report> {
     match start_datetime {
         Some(start_datetime) => {
@@ -133,7 +151,7 @@ async fn get_start_block(
         None => match settings.scanner.start_block {
             Some(start_block) => Ok(start_block),
             None => get_start_block_from_global_properties(
-                settings.scanner.start_datetime, dynamic_global_properties
+                settings.scanner.start_datetime, dynamic_global_properties,
             ).await
         }
     }

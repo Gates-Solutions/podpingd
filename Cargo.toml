@@ -18,3 +18,4 @@ serde_json = "1.0.128"
 chrono = { version = "0.4.38", features = ["serde"] }
 serde_with = { version = "3.9.0", features = ["chrono", "json"] }
 regex = "1.10.6"
+futures = "0.3.30"
