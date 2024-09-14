@@ -20,6 +20,7 @@ use color_eyre::Report;
 use podping_schemas::org::podcastindex::podping::podping_json::Podping;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn, Level};
 use hive::scanner;
 use crate::config::{Settings, CARGO_PKG_VERSION};
@@ -63,47 +64,46 @@ async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: 
 
                     let create_dir_future = tokio::fs::create_dir_all(&current_block_dir);
 
-                    let podping_write_futures = block.transactions.iter()
-                        .flat_map(|tx| {
-                            return tx.podpings.iter()
-                                .enumerate()
-                                .filter_map(|(i, podping)| {
-                                    let podping_file = match podping {
-                                        Podping::V0(_)
-                                        | Podping::V02(_)
-                                        | Podping::V03(_)
-                                        | Podping::V10(_) => current_block_dir
-                                            .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
-                                        Podping::V11(pp) => current_block_dir
-                                            .join(format!(
-                                                "{}_{}_{}_{}.json",
-                                                block.block_num,
-                                                tx.tx_id,
-                                                pp.session_id.to_string(),
-                                                pp.timestamp_ns.to_string())
-                                            ),
-                                    };
+                    let mut write_join_set = JoinSet::new();
 
-                                    let json = serde_json::to_string(&podping);
+                    for tx in block.transactions {
+                        for (i, podping) in tx.podpings.iter().enumerate() {
+                            let podping_file = match podping {
+                                Podping::V0(_)
+                                | Podping::V02(_)
+                                | Podping::V03(_)
+                                | Podping::V10(_) => current_block_dir
+                                    .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
+                                Podping::V11(pp) => current_block_dir
+                                    .join(format!(
+                                        "{}_{}_{}_{}.json",
+                                        block.block_num,
+                                        tx.tx_id,
+                                        pp.session_id.to_string(),
+                                        pp.timestamp_ns.to_string())
+                                    ),
+                            };
 
-                                    match json {
-                                        Ok(json) => {
-                                            info!("block: {}, tx: {}, podping: {}", block.block_num, tx.tx_id, json);
+                            let json = serde_json::to_string(&podping);
 
-                                            info!("Writing podping to file: {}", podping_file.to_string_lossy());
-                                            Some(tokio::fs::write(podping_file, json))
-                                        }
-                                        Err(e) => {
-                                            error!("Error writing podping file {}: {}", podping_file.to_string_lossy(), e);
-                                            None
-                                        }
-                                    }
-                                }).collect::<Vec<_>>();
-                        }).collect::<Vec<_>>();
+                            match json {
+                                Ok(json) => {
+                                    info!("block: {}, tx: {}, podping: {}", block.block_num, tx.tx_id, json);
+
+                                    info!("Writing podping to file: {}", podping_file.to_string_lossy());
+                                    write_join_set.spawn(tokio::fs::write(podping_file, json));
+                                }
+                                Err(e) => {
+                                    error!("Error writing podping file {}: {}", podping_file.to_string_lossy(), e);
+                                }
+                            }
+                        }
+                    }
 
                     create_dir_future.await?;
 
-                    futures::future::join_all(podping_write_futures).await;
+                    //futures::future::join_all(podping_write_futures).await;
+                    write_join_set.join_all().await;
                 }
 
                 tokio::fs::write(&last_block_file_path, block.block_num.to_string()).await?;
