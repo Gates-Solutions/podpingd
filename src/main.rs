@@ -102,7 +102,6 @@ async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: 
 
                     create_dir_future.await?;
 
-                    //futures::future::join_all(podping_write_futures).await;
                     write_join_set.join_all().await;
                 }
 
