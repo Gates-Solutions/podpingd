@@ -23,11 +23,11 @@ impl ToRpcParams for EmptyParams {
 }
 
 #[derive(Serialize, Debug)]
-pub(crate) struct GetBlockParams {
-    pub(crate) block_num: u64
+pub(crate) struct GetBlockParams<'a> {
+    pub(crate) block_num: &'a u64
 }
 
-impl ToRpcParams for GetBlockParams {
+impl ToRpcParams for GetBlockParams<'_> {
     fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
         Ok(Some(serde_json::value::to_raw_value(&self)?))
     }

@@ -31,8 +31,103 @@ use crate::hive::scanner::HiveBlockWithNum;
 const FIRST_PODPING_BLOCK: u64 = 53_691_004;
 const LAST_UPDATED_BLOCK_FILENAME: &str = "last_updated_block";
 
+
+async fn write_block_transactions(data_dir_path: PathBuf, block: HiveBlockWithNum) -> Result<(), Report> {
+    if block.transactions.is_empty() {
+        info!("No Podpings for block {}", block.block_num);
+    } else {
+        let current_block_dir = data_dir_path
+            .join(block.timestamp.year().to_string())
+            .join(block.timestamp.month().to_string())
+            .join(block.timestamp.day().to_string())
+            .join(block.timestamp.hour().to_string())
+            .join(block.timestamp.minute().to_string())
+            .join(block.timestamp.second().to_string());
+
+        let create_dir_future = tokio::fs::create_dir_all(&current_block_dir);
+
+        let mut write_join_set = JoinSet::new();
+
+        for tx in &block.transactions {
+            for (i, podping) in tx.podpings.iter().enumerate() {
+                let podping_file = match podping {
+                    Podping::V0(_)
+                    | Podping::V02(_)
+                    | Podping::V03(_)
+                    | Podping::V10(_) => current_block_dir
+                        .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
+                    Podping::V11(pp) => current_block_dir
+                        .join(format!(
+                            "{}_{}_{}_{}.json",
+                            block.block_num,
+                            tx.tx_id,
+                            pp.session_id.to_string(),
+                            pp.timestamp_ns.to_string())
+                        ),
+                };
+
+                let json = serde_json::to_string(&podping);
+
+                match json {
+                    Ok(json) => {
+                        info!("block: {}, tx: {}, podping: {}", block.block_num, tx.tx_id, json);
+
+                        info!("Writing podping to file: {}", podping_file.to_string_lossy());
+                        write_join_set.spawn(tokio::fs::write(podping_file, json));
+                    }
+                    Err(e) => {
+                        error!("Error writing podping file {}: {}", podping_file.to_string_lossy(), e);
+                    }
+                }
+            }
+        }
+
+        create_dir_future.await?;
+
+        write_join_set.join_all().await;
+    }
+    Ok(())
+}
+
+async fn batch_disk_writer(mut rx: Receiver<Vec<HiveBlockWithNum>>, data_dir_path: PathBuf) -> Result<(), Report> {
+    let last_block_file_path = data_dir_path.join(LAST_UPDATED_BLOCK_FILENAME);
+
+    loop {
+        let result = rx.recv().await;
+
+        let block = match result {
+            Ok(block) => Some(block),
+            Err(RecvError::Lagged(e)) => {
+                warn!("Disk writer is lagging: {}", e);
+
+                None
+            }
+            Err(RecvError::Closed) => {
+                break
+            }
+        };
+
+        match block {
+            Some(blocks) => {
+                let last_block_num = &blocks.last().unwrap().block_num.to_string();
+                let mut write_join_set = JoinSet::new();
+
+                for block in blocks {
+                    write_join_set.spawn(write_block_transactions(data_dir_path.clone(), block));
+                }
+
+                write_join_set.join_all().await;
+
+                tokio::fs::write(&last_block_file_path, last_block_num.to_string()).await?;
+            }
+            None => {}
+        }
+    };
+
+    Ok(())
+}
+
 async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: PathBuf) -> Result<(), Report> {
-    // TODO: Make output directory configurable
     let last_block_file_path = data_dir_path.join(LAST_UPDATED_BLOCK_FILENAME);
 
     loop {
@@ -51,61 +146,9 @@ async fn podping_disk_writer(mut rx: Receiver<HiveBlockWithNum>, data_dir_path: 
         };
         match block {
             Some(block) => {
-                if block.transactions.is_empty() {
-                    info!("No Podpings for block {}", block.block_num);
-                } else {
-                    let current_block_dir = data_dir_path
-                        .join(block.timestamp.year().to_string())
-                        .join(block.timestamp.month().to_string())
-                        .join(block.timestamp.day().to_string())
-                        .join(block.timestamp.hour().to_string())
-                        .join(block.timestamp.minute().to_string())
-                        .join(block.timestamp.second().to_string());
-
-                    let create_dir_future = tokio::fs::create_dir_all(&current_block_dir);
-
-                    let mut write_join_set = JoinSet::new();
-
-                    for tx in block.transactions {
-                        for (i, podping) in tx.podpings.iter().enumerate() {
-                            let podping_file = match podping {
-                                Podping::V0(_)
-                                | Podping::V02(_)
-                                | Podping::V03(_)
-                                | Podping::V10(_) => current_block_dir
-                                    .join(format!("{}_{}_{}.json", block.block_num, tx.tx_id, i)),
-                                Podping::V11(pp) => current_block_dir
-                                    .join(format!(
-                                        "{}_{}_{}_{}.json",
-                                        block.block_num,
-                                        tx.tx_id,
-                                        pp.session_id.to_string(),
-                                        pp.timestamp_ns.to_string())
-                                    ),
-                            };
-
-                            let json = serde_json::to_string(&podping);
-
-                            match json {
-                                Ok(json) => {
-                                    info!("block: {}, tx: {}, podping: {}", block.block_num, tx.tx_id, json);
-
-                                    info!("Writing podping to file: {}", podping_file.to_string_lossy());
-                                    write_join_set.spawn(tokio::fs::write(podping_file, json));
-                                }
-                                Err(e) => {
-                                    error!("Error writing podping file {}: {}", podping_file.to_string_lossy(), e);
-                                }
-                            }
-                        }
-                    }
-
-                    create_dir_future.await?;
-
-                    write_join_set.join_all().await;
-                }
-
-                tokio::fs::write(&last_block_file_path, block.block_num.to_string()).await?;
+                let block_num = block.block_num.to_owned();
+                write_block_transactions(data_dir_path.clone(), block).await?;
+                tokio::fs::write(&last_block_file_path, block_num.to_string()).await?
             }
             None => {}
         }
@@ -144,7 +187,6 @@ async fn get_start_block(
         _ => None
     };
 
-    // TODO: add custom start time
     match last_updated_block {
         Some(last_updated_block) => Ok(last_updated_block + 1),
         None => match settings.scanner.start_block {
@@ -197,21 +239,36 @@ async fn main() -> Result<()> {
     }
 
     let last_block_file = data_dir_path.join(LAST_UPDATED_BLOCK_FILENAME);
-    let dynamic_global_properties = scanner::get_dynamic_global_properties().await?;
-    let start_block = get_start_block(&settings, last_block_file, &dynamic_global_properties).await?;
+    let mut dynamic_global_properties = scanner::get_dynamic_global_properties().await?;
+    let mut start_block = get_start_block(&settings, last_block_file, &dynamic_global_properties).await?;
 
     info!("Starting scan at block {}", start_block);
 
+    if start_block < dynamic_global_properties.head_block_number {
+        info!("Current block is behind... catching up");
+        while start_block < dynamic_global_properties.head_block_number-10 {
+            let (tx, rx) = tokio::sync::broadcast::channel::<Vec<HiveBlockWithNum>>(1);
+
+            let mut catchup_joinset = JoinSet::new();
+            catchup_joinset.spawn(scanner::catchup_chain(start_block, dynamic_global_properties.head_block_number, tx));
+            catchup_joinset.spawn(batch_disk_writer(rx, data_dir_path.clone()));
+
+            catchup_joinset.join_all().await;
+            start_block = dynamic_global_properties.head_block_number + 1;
+            dynamic_global_properties = scanner::get_dynamic_global_properties().await?;
+        }
+
+        info!("Done catching up! Now at block {}", start_block);
+    }
+
     let (tx, rx) = tokio::sync::broadcast::channel::<HiveBlockWithNum>(1);
 
-    // TODO: Check if next block is in the past and catch up with batch requests
-    // Haven't tested batch requests with jsonrpsee yet
     let scanner_handle = tokio::spawn(async move {
         scanner::scan_chain(start_block, tx).await;
     });
 
     let disk_writer_handle = tokio::spawn(async move {
-        podping_disk_writer(rx, data_dir_path).await;
+        podping_disk_writer(rx, data_dir_path.clone()).await;
     });
 
     scanner_handle.await?;

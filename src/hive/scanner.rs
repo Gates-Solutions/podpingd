@@ -9,16 +9,21 @@
  *
  *     You should have received a copy of the GNU Lesser General Public License along with podpingd. If not, see <https://www.gnu.org/licenses/>.
  */
+use std::ops::{Range, RangeInclusive};
+use std::option::Iter;
+use std::sync::Arc;
 use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use color_eyre::{Report, Result};
 use jsonrpsee::core::ClientError::{ParseError, RestartNeeded, Transport};
+use jsonrpsee::core::params::BatchRequestBuilder;
 use podping_schemas::org::podcastindex::podping::podping_json::{Podping, PodpingV02, PodpingV03};
 use tracing::{debug, error, info, trace, warn};
 use jsonrpsee::http_client::HttpClient;
 use tokio::sync::broadcast::Sender;
 use tokio::time::sleep;
 use regex::Regex;
+use tokio::sync::{Mutex, RwLock};
 use crate::hive::jsonrpc::{block_api, condenser_api};
 use crate::hive::jsonrpc::request_params::GetBlockParams;
 use crate::hive::jsonrpc::responses::{GetBlockResponse, GetDynamicGlobalPropertiesResponse, HiveTransaction};
@@ -39,7 +44,7 @@ pub(crate) struct HiveTransactionWithTxId {
 }
 
 pub(crate) async fn get_dynamic_global_properties() -> Result<GetDynamicGlobalPropertiesResponse, Report> {
-    let client = HttpClient::builder().build("https://rpc.podping.org")?;
+    let client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
 
     let response: Result<GetDynamicGlobalPropertiesResponse, _> = condenser_api::get_dynamic_global_properties(&client).await;
     trace!("condenser_api::get_dynamic_global_properties response: {:?}", response);
@@ -47,9 +52,183 @@ pub(crate) async fn get_dynamic_global_properties() -> Result<GetDynamicGlobalPr
     Ok(response?)
 }
 
+pub fn block_response_to_hive_block(block_num: u64, id_regex: &Regex, response: GetBlockResponse) -> HiveBlockWithNum {
+    HiveBlockWithNum {
+        block_num,
+        block_id: response.block.block_id,
+        timestamp: response.block.timestamp,
+        transactions: response.block.transactions.into_iter()
+            .enumerate()
+            .flat_map(|(i, tx)| {
+                Some(HiveTransactionWithTxId {
+                    tx_id: response.block.transaction_ids[i].to_string(),
+                    podpings: tx.operations.into_iter()
+                        .filter_map(|op| -> Option<Podping> {
+                            // I tried to move this into its own function,
+                            // but failed miserably because I needed a closure
+                            // and probably violated some lifetime thing
+                            //
+                            // Don't judge me.
+
+                            if op.type_ != "custom_json_operation" {
+                                return None;
+                            }
+
+                            match &op.value {
+                                Some(op_value) => {
+                                    match &op_value.id {
+                                        Some(id) => {
+                                            if id_regex.is_match(id) {
+                                                match &op.value {
+                                                    Some(op_value) => {
+                                                        match &op_value.json {
+                                                            Some(podping) => {
+                                                                Some(podping.clone())
+                                                            }
+                                                            None => None
+                                                        }
+                                                    }
+                                                    None => None
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        None => None
+                                    }
+                                }
+                                None => None
+                            }
+                        })
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .filter(|tx| {
+                !tx.podpings.is_empty()
+            }).collect::<Vec<_>>(),
+    }
+}
+
+async fn send_block<S: Send, T: ToOwned<Owned=S>>(tx: &Sender<S>, block: T) {
+    loop {
+        match tx.send(block.to_owned()) {
+            Ok(_) => break,
+            Err(e) => {
+                warn!("Scanner send error {}", e);
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+}
+
+struct BlockRangeChunks {
+    start_block: u64,
+    end_block: u64,
+    batch_size: u64
+}
+
+impl BlockRangeChunks {
+    pub fn iter(&self) -> BlockRangeChunksIterator {
+        BlockRangeChunksIterator {
+            chunks: self,
+            next_start: self.start_block,
+        }
+    }
+}
+
+struct BlockRangeChunksIterator<'a> {
+    chunks: &'a BlockRangeChunks,
+    next_start: u64
+}
+
+impl Iterator for BlockRangeChunksIterator<'_> {
+    type Item = Vec<u64>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next_start > self.chunks.end_block {
+            return None
+        }
+
+        let range_start = self.next_start;
+
+        let range_end = if range_start + self.chunks.batch_size <= self.chunks.end_block {
+            range_start + self.chunks.batch_size
+        } else {
+            self.chunks.end_block + 1
+        };
+
+        self.next_start = range_end;
+
+        Some((range_start..range_end).collect())
+    }
+}
+
+pub async fn catchup_chain(start_block: u64, end_block: u64, tx: Sender<Vec<HiveBlockWithNum>>) -> Result<(), Report> {
+    let mut client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+
+    let id_regex: Regex = Regex::new(r"^pp_(.*)_(.*)|podping$")?;
+
+    let chunks = BlockRangeChunks {
+        start_block,
+        end_block,
+        batch_size: 100
+    };
+
+    for chunk in chunks.iter() {
+        let mut batch_request_builder = BatchRequestBuilder::new();
+
+        for block_num in &chunk {
+            let params = GetBlockParams {
+                block_num: &block_num
+            };
+
+            block_api::build_get_block_batch_params(params, &mut batch_request_builder)
+                .expect("Error building batch request");
+        }
+
+        let batch_response = block_api::get_block_batch(&client, batch_request_builder).await;
+        trace!("block_api::get_block batch response: {:?}", batch_response);
+
+        match batch_response {
+            Ok(batch_response) => {
+                let responses_with_block_num = chunk.into_iter().zip(batch_response);
+                let blocks = responses_with_block_num.map(|(block_num, entry)| {
+                    let response = entry.unwrap();
+                    block_response_to_hive_block(block_num, &id_regex, response)
+                }).collect::<Vec<_>>();
+
+                send_block(&tx, blocks).await;
+            }
+            Err(ParseError(e)) => {
+                warn!("Parse error {}", e);
+                warn!("Retrying block_chunk")
+            }
+            Err(RestartNeeded(e)) => {
+                warn!("{:#?}", e);
+                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+                warn!("Retrying block_chunk")
+            }
+            Err(Transport(e)) => {
+                warn!("{:#?}", e);
+                warn!("Retrying block_chunk")
+            }
+            Err(e) => {
+                // Rather brute force error handling
+                // the hyper http client seems to have issues with http2 streams closing
+                // https://github.com/hyperium/hyper/issues/2500
+                // TODO: There's probably a better way to handle it, I just haven't spent the time
+                error!("{:#?}", e);
+                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+            }
+        };
+    }
+
+    Ok(())
+}
+
 pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Result<(), Report> {
     // TODO: Set a configurable RPC server, and ideally a list of RPC servers to rotate
-    let mut client = HttpClient::builder().build("https://rpc.podping.org")?;
+    let mut client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
 
     let mut block_num = start_block;
 
@@ -60,7 +239,7 @@ pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Resul
         let start_time = Utc::now();
 
         let params = GetBlockParams {
-            block_num
+            block_num: &block_num
         };
 
         let response: Result<GetBlockResponse, _> = block_api::get_block(&client, params).await;
@@ -68,71 +247,11 @@ pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Resul
 
         match response {
             Ok(response) => {
-                let block = HiveBlockWithNum {
-                    block_num,
-                    block_id: response.block.block_id,
-                    timestamp: response.block.timestamp,
-                    transactions: response.block.transactions.into_iter()
-                        .enumerate()
-                        .flat_map(|(i, tx)| {
-                            Some(HiveTransactionWithTxId {
-                                tx_id: response.block.transaction_ids[i].to_string(),
-                                podpings: tx.operations.into_iter()
-                                    .filter_map(|op| -> Option<Podping> {
-                                        // I tried to move this into its own function,
-                                        // but failed miserably because I needed a closure
-                                        // and probably violated some lifetime thing
-                                        //
-                                        // Don't judge me.
+                let block = block_response_to_hive_block(block_num, &id_regex, response);
 
-                                        if op.type_ != "custom_json_operation" {
-                                            return None
-                                        }
-
-                                        match &op.value {
-                                            Some(op_value) => {
-                                                match &op_value.id {
-                                                    Some(id) => {
-                                                        if id_regex.is_match(id) {
-                                                            match &op.value {
-                                                                Some(op_value) => {
-                                                                    match &op_value.json {
-                                                                        Some(podping) => {
-                                                                            Some(podping.clone())
-                                                                        }
-                                                                        None => None
-                                                                    }
-                                                                }
-                                                                None => None
-                                                            }
-                                                        } else {
-                                                            None
-                                                        }
-                                                    }
-                                                    None => None
-                                                }
-                                            }
-                                            None => None
-                                        }
-                                    })
-                                    .collect::<Vec<_>>(),
-                            })
-                        })
-                        .filter(|tx| {
-                            !tx.podpings.is_empty()
-                        }).collect::<Vec<_>>(),
-                };
                 let block_timestamp = block.timestamp.clone();
 
-                loop {
-                    match tx.send(block.to_owned()) {
-                        Ok(_) => break,
-                        Err(e) => {
-                            warn!("Scanner send error {}", e);
-                            sleep(Duration::from_millis(100)).await;
-                        }
-                    }
-                }
+                send_block(&tx, block).await;
 
                 block_num += 1;
 
@@ -154,7 +273,7 @@ pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Resul
             }
             Err(RestartNeeded(e)) => {
                 warn!("{:#?}", e);
-                client = HttpClient::builder().build("https://rpc.podping.org")?;
+                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
                 warn!("Retrying block {}", block_num)
             }
             Err(Transport(e)) => {
@@ -167,7 +286,7 @@ pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Resul
                 // https://github.com/hyperium/hyper/issues/2500
                 // TODO: There's probably a better way to handle it, I just haven't spent the time
                 error!("{:#?}", e);
-                client = HttpClient::builder().build("https://rpc.podping.org")?;
+                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
             }
         };
     }
