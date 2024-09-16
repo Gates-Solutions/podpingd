@@ -20,20 +20,9 @@ use podping_schemas::org::podcastindex::podping::podping_json::Podping;
 // Example from https://serde.rs/custom-date-format.html
 pub(crate) mod hive_datetime_format {
     use chrono::{DateTime, NaiveDateTime, Utc};
-    use serde::{self, Deserialize, Deserializer, Serializer};
+    use serde::{self, Deserialize, Deserializer};
 
     const FORMAT: &'static str = "%Y-%m-%dT%H:%M:%S";
-
-    pub fn serialize<S>(
-        date: &DateTime<Utc>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let s = format!("{}", date.format(FORMAT));
-        serializer.serialize_str(&s)
-    }
 
     pub fn deserialize<'de, D>(
         deserializer: D,
@@ -83,7 +72,6 @@ pub(crate) struct GetBlockResponse {
 #[derive(Deserialize, Debug)]
 pub(crate) struct HiveBlock {
     // There are a lot more fields, but this is all we care about
-    pub(crate) block_id: String,
     #[serde(with = "hive_datetime_format")]
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) transaction_ids: Vec<String>,

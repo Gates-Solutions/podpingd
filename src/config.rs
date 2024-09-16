@@ -9,6 +9,7 @@
  *
  *     You should have received a copy of the GNU Lesser General Public License along with podpingd. If not, see <https://www.gnu.org/licenses/>.
  */
+use std::path::Path;
 use chrono::{DateTime, Utc};
 use config::{Config, File};
 use serde::Deserialize;
@@ -18,6 +19,7 @@ pub(crate) const CARGO_PKG_VERSION: Option<&'static str> = option_env!("CARGO_PK
 
 #[derive(Debug, Deserialize)]
 pub struct Scanner {
+    pub(crate) rpc_nodes: Vec<String>,
     pub(crate) start_block: Option<u64>,
     pub(crate) start_datetime: Option<DateTime<Utc>>,
 }
@@ -33,8 +35,21 @@ pub struct Settings {
 
 
 pub(crate) fn load_config() -> Settings {
+    let user_config_file_option = option_env!("PODPINGD_CONFIG_FILE");
+
+    let user_config_file = match user_config_file_option {
+        Some(file) => {
+            if !Path::new(file).exists() {
+                panic!("File {} defined by PODPINGD_CONFIG_FILE does not exist", file);
+            }
+            file
+        },
+        None => ""
+    };
+
     let config = Config::builder()
         .add_source(File::with_name("conf/00-default.toml"))
+        .add_source(File::with_name(user_config_file).required(false))
         .add_source(
             config::Environment::with_prefix("PODPINGD")
                 .try_parsing(true)

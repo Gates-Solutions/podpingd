@@ -14,21 +14,25 @@ mod config;
 mod hive;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use color_eyre::eyre::Result;
 use color_eyre::Report;
 use podping_schemas::org::podcastindex::podping::podping_json::Podping;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
-use tracing::{debug, error, info, warn, Level};
+use tracing::{error, info, warn, Level};
 use hive::scanner;
 use crate::config::{Settings, CARGO_PKG_VERSION};
+use crate::hive::jsonrpc::client::{JsonRpcClient, JsonRpcClientImpl};
 use crate::hive::jsonrpc::responses::GetDynamicGlobalPropertiesResponse;
 use crate::hive::scanner::HiveBlockWithNum;
 
+// for historical purposes
+//const FIRST_PODPING_BLOCK: u64 = 53_691_004;
 
-const FIRST_PODPING_BLOCK: u64 = 53_691_004;
 const LAST_UPDATED_BLOCK_FILENAME: &str = "last_updated_block";
 
 
@@ -162,7 +166,7 @@ async fn get_start_block_from_global_properties(
     match start_datetime {
         Some(start_datetime) => {
             if start_datetime > dynamic_global_properties.time {
-                panic!("start_datetime is in the future!")
+                panic!("start_datetime {} is in the future!", start_datetime)
             }
 
             let time_delta = dynamic_global_properties.time - start_datetime;
@@ -235,11 +239,13 @@ async fn main() -> Result<()> {
     };
 
     if !data_dir_path.is_dir() {
-        panic!("Data directory is not a directory.  Please ensure it exists");
+        panic!("Data directory {} is not a directory.  Please ensure it exists", data_dir_path.display());
     }
 
     let last_block_file = data_dir_path.join(LAST_UPDATED_BLOCK_FILENAME);
-    let mut dynamic_global_properties = scanner::get_dynamic_global_properties().await?;
+    let json_rpc_client = Arc::new(Mutex::new(JsonRpcClientImpl::new(settings.scanner.rpc_nodes.clone())?));
+
+    let mut dynamic_global_properties = scanner::get_dynamic_global_properties(json_rpc_client.clone()).await?;
     let mut start_block = get_start_block(&settings, last_block_file, &dynamic_global_properties).await?;
 
     info!("Starting scan at block {}", start_block);
@@ -250,12 +256,16 @@ async fn main() -> Result<()> {
             let (tx, rx) = tokio::sync::broadcast::channel::<Vec<HiveBlockWithNum>>(1);
 
             let mut catchup_joinset = JoinSet::new();
-            catchup_joinset.spawn(scanner::catchup_chain(start_block, dynamic_global_properties.head_block_number, tx));
+            catchup_joinset.spawn(
+                scanner::catchup_chain(
+                    start_block, dynamic_global_properties.head_block_number, tx, json_rpc_client.clone()
+                )
+            );
             catchup_joinset.spawn(batch_disk_writer(rx, data_dir_path.clone()));
 
             catchup_joinset.join_all().await;
             start_block = dynamic_global_properties.head_block_number + 1;
-            dynamic_global_properties = scanner::get_dynamic_global_properties().await?;
+            dynamic_global_properties = scanner::get_dynamic_global_properties(json_rpc_client.clone()).await?;
         }
 
         info!("Done catching up! Now at block {}", start_block);
@@ -264,11 +274,11 @@ async fn main() -> Result<()> {
     let (tx, rx) = tokio::sync::broadcast::channel::<HiveBlockWithNum>(1);
 
     let scanner_handle = tokio::spawn(async move {
-        scanner::scan_chain(start_block, tx).await;
+        let _ = scanner::scan_chain(start_block, tx, json_rpc_client.clone()).await;
     });
 
     let disk_writer_handle = tokio::spawn(async move {
-        podping_disk_writer(rx, data_dir_path.clone()).await;
+        let _ = podping_disk_writer(rx, data_dir_path.clone()).await;
     });
 
     scanner_handle.await?;

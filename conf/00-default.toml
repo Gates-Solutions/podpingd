@@ -1,14 +1,27 @@
+# These are default values
+# If you want to make changes, copy this file somewhere and set
+# an environment variable PODPINGD_CONFIG_FILE=<your-file-path.yaml>
 debug = false
 data_directory = "./data"
 
 [scanner]
+rpc_nodes = [
+    "https://rpc.podping.org",
+    "https://hive-api.web3telekom.xyz",
+    "https://api.openhive.network",
+    "https://hived.emre.sh",
+    "https://hive-api.arcange.eu",
+    "https://rpc.mahdiyari.info",
+    "https://rpc.ecency.com",
+]
 # If both start_block and start_datetime are set, start_block takes precedence
 # If {{data_directory}}/last_updated_block exists, both of these values are ignored
 # If none of the above, default to the current block
 
 # This is the first Podping block as an example
 # You probably don't need to go back this far
+# Check https://hive.ausbit.dev/ for the most recent block if you really want
 #start_block = 53691004
 
 # ISO-8601 datetime of approximately when to start
-#start_datetime = 2024-09-13T00:00:00Z
+#start_datetime = "2024-09-15T00:00:00-0600"

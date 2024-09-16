@@ -13,3 +13,4 @@ pub mod block_api;
 pub mod condenser_api;
 pub mod request_params;
 pub mod responses;
+pub mod client;

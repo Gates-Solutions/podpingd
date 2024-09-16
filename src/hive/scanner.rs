@@ -9,30 +9,27 @@
  *
  *     You should have received a copy of the GNU Lesser General Public License along with podpingd. If not, see <https://www.gnu.org/licenses/>.
  */
-use std::ops::{Range, RangeInclusive};
-use std::option::Iter;
 use std::sync::Arc;
 use std::time::Duration;
 use chrono::{DateTime, TimeDelta, Utc};
 use color_eyre::{Report, Result};
 use jsonrpsee::core::ClientError::{ParseError, RestartNeeded, Transport};
 use jsonrpsee::core::params::BatchRequestBuilder;
-use podping_schemas::org::podcastindex::podping::podping_json::{Podping, PodpingV02, PodpingV03};
-use tracing::{debug, error, info, trace, warn};
-use jsonrpsee::http_client::HttpClient;
+use podping_schemas::org::podcastindex::podping::podping_json::Podping;
+use tracing::{error, trace, warn};
 use tokio::sync::broadcast::Sender;
 use tokio::time::sleep;
 use regex::Regex;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 use crate::hive::jsonrpc::{block_api, condenser_api};
+use crate::hive::jsonrpc::client::{JsonRpcClient, JsonRpcClientImpl};
 use crate::hive::jsonrpc::request_params::GetBlockParams;
-use crate::hive::jsonrpc::responses::{GetBlockResponse, GetDynamicGlobalPropertiesResponse, HiveTransaction};
+use crate::hive::jsonrpc::responses::{GetBlockResponse, GetDynamicGlobalPropertiesResponse};
 
 
 #[derive(Debug, Clone)]
 pub(crate) struct HiveBlockWithNum {
     pub(crate) block_num: u64,
-    pub(crate) block_id: String,
     pub(crate) timestamp: DateTime<Utc>,
     pub(crate) transactions: Vec<HiveTransactionWithTxId>,
 }
@@ -43,8 +40,11 @@ pub(crate) struct HiveTransactionWithTxId {
     pub(crate) podpings: Vec<Podping>,
 }
 
-pub(crate) async fn get_dynamic_global_properties() -> Result<GetDynamicGlobalPropertiesResponse, Report> {
-    let client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+pub(crate) async fn get_dynamic_global_properties(
+    json_rpc_client: Arc<Mutex<JsonRpcClientImpl>>
+) -> Result<GetDynamicGlobalPropertiesResponse, Report> {
+    let jpc = json_rpc_client.lock().await;
+    let client = jpc.get_client();
 
     let response: Result<GetDynamicGlobalPropertiesResponse, _> = condenser_api::get_dynamic_global_properties(&client).await;
     trace!("condenser_api::get_dynamic_global_properties response: {:?}", response);
@@ -55,7 +55,6 @@ pub(crate) async fn get_dynamic_global_properties() -> Result<GetDynamicGlobalPr
 pub fn block_response_to_hive_block(block_num: u64, id_regex: &Regex, response: GetBlockResponse) -> HiveBlockWithNum {
     HiveBlockWithNum {
         block_num,
-        block_id: response.block.block_id,
         timestamp: response.block.timestamp,
         transactions: response.block.transactions.into_iter()
             .enumerate()
@@ -124,7 +123,7 @@ async fn send_block<S: Send, T: ToOwned<Owned=S>>(tx: &Sender<S>, block: T) {
 struct BlockRangeChunks {
     start_block: u64,
     end_block: u64,
-    batch_size: u64
+    batch_size: u64,
 }
 
 impl BlockRangeChunks {
@@ -138,7 +137,7 @@ impl BlockRangeChunks {
 
 struct BlockRangeChunksIterator<'a> {
     chunks: &'a BlockRangeChunks,
-    next_start: u64
+    next_start: u64,
 }
 
 impl Iterator for BlockRangeChunksIterator<'_> {
@@ -146,7 +145,7 @@ impl Iterator for BlockRangeChunksIterator<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.next_start > self.chunks.end_block {
-            return None
+            return None;
         }
 
         let range_start = self.next_start;
@@ -163,15 +162,21 @@ impl Iterator for BlockRangeChunksIterator<'_> {
     }
 }
 
-pub async fn catchup_chain(start_block: u64, end_block: u64, tx: Sender<Vec<HiveBlockWithNum>>) -> Result<(), Report> {
-    let mut client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+pub async fn catchup_chain(
+    start_block: u64,
+    end_block: u64,
+    tx: Sender<Vec<HiveBlockWithNum>>,
+    json_rpc_client: Arc<Mutex<JsonRpcClientImpl>>,
+) -> Result<(), Report> {
+    let mut jpc = json_rpc_client.lock().await;
+    let mut client = jpc.get_client();
 
     let id_regex: Regex = Regex::new(r"^pp_(.*)_(.*)|podping$")?;
 
     let chunks = BlockRangeChunks {
         start_block,
         end_block,
-        batch_size: 100
+        batch_size: 100,
     };
 
     for chunk in chunks.iter() {
@@ -201,15 +206,20 @@ pub async fn catchup_chain(start_block: u64, end_block: u64, tx: Sender<Vec<Hive
             }
             Err(ParseError(e)) => {
                 warn!("Parse error {}", e);
+                jpc.rotate_node()?;
+                client = jpc.get_client();
                 warn!("Retrying block_chunk")
             }
             Err(RestartNeeded(e)) => {
                 warn!("{:#?}", e);
-                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+                jpc.rotate_node()?;
+                client = jpc.get_client();
                 warn!("Retrying block_chunk")
             }
             Err(Transport(e)) => {
                 warn!("{:#?}", e);
+                jpc.rotate_node()?;
+                client = jpc.get_client();
                 warn!("Retrying block_chunk")
             }
             Err(e) => {
@@ -218,7 +228,8 @@ pub async fn catchup_chain(start_block: u64, end_block: u64, tx: Sender<Vec<Hive
                 // https://github.com/hyperium/hyper/issues/2500
                 // TODO: There's probably a better way to handle it, I just haven't spent the time
                 error!("{:#?}", e);
-                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+                jpc.rotate_node()?;
+                client = jpc.get_client();
             }
         };
     }
@@ -226,9 +237,13 @@ pub async fn catchup_chain(start_block: u64, end_block: u64, tx: Sender<Vec<Hive
     Ok(())
 }
 
-pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Result<(), Report> {
-    // TODO: Set a configurable RPC server, and ideally a list of RPC servers to rotate
-    let mut client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+pub async fn scan_chain(
+    start_block: u64,
+    tx: Sender<HiveBlockWithNum>,
+    json_rpc_client: Arc<Mutex<JsonRpcClientImpl>>,
+) -> Result<(), Report> {
+    let mut jpc = json_rpc_client.lock().await;
+    let mut client = jpc.get_client();
 
     let mut block_num = start_block;
 
@@ -269,15 +284,20 @@ pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Resul
             }
             Err(ParseError(e)) => {
                 warn!("Parse error {}", e);
+                jpc.rotate_node()?;
+                client = jpc.get_client();
                 warn!("Retrying block {}", block_num)
             }
             Err(RestartNeeded(e)) => {
                 warn!("{:#?}", e);
-                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+                jpc.rotate_node()?;
+                client = jpc.get_client();
                 warn!("Retrying block {}", block_num)
             }
             Err(Transport(e)) => {
                 warn!("{:#?}", e);
+                jpc.rotate_node()?;
+                client = jpc.get_client();
                 warn!("Retrying block {}", block_num)
             }
             Err(e) => {
@@ -286,7 +306,8 @@ pub async fn scan_chain(start_block: u64, tx: Sender<HiveBlockWithNum>) -> Resul
                 // https://github.com/hyperium/hyper/issues/2500
                 // TODO: There's probably a better way to handle it, I just haven't spent the time
                 error!("{:#?}", e);
-                client = HttpClient::builder().build("https://hive-api.web3telekom.xyz")?;
+                jpc.rotate_node()?;
+                client = jpc.get_client();
             }
         };
     }
