@@ -12,10 +12,16 @@
 use jsonrpsee::http_client::HttpClient;
 use jsonrpsee::core::client::{BatchResponse, ClientT, Error};
 use jsonrpsee::core::params::BatchRequestBuilder;
+use jsonrpsee_http_client::transport::HttpBackend;
+use tower_http::compression::Compression;
+use tower_http::decompression::Decompression;
 use crate::hive::jsonrpc::request_params::GetBlockParams;
 use crate::hive::jsonrpc::responses::GetBlockResponse;
 
-pub async fn get_block(client: &HttpClient, params: GetBlockParams<'_>) -> Result<GetBlockResponse, Error> {
+pub async fn get_block(
+    client: &HttpClient<Decompression<Compression<HttpBackend>>>,
+    params: GetBlockParams<'_>
+) -> Result<GetBlockResponse, Error> {
     client.request("block_api.get_block", params).await
 }
 
@@ -27,7 +33,7 @@ pub fn build_get_block_batch_params(
 }
 
 pub async fn get_block_batch(
-    client: & HttpClient,
+    client: &HttpClient<Decompression<Compression<HttpBackend>>>,
     batch_request_builder: BatchRequestBuilder<'static>,
 ) -> Result<BatchResponse<'static, GetBlockResponse>, Error> {
     client.batch_request(batch_request_builder).await

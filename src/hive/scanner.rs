@@ -205,19 +205,19 @@ pub async fn catchup_chain(
                 send_block(&tx, blocks).await;
             }
             Err(ParseError(e)) => {
-                warn!("Parse error {}", e);
+                warn!("Parse error; {}", e);
                 jpc.rotate_node()?;
                 client = jpc.get_client();
                 warn!("Retrying block_chunk")
             }
             Err(RestartNeeded(e)) => {
-                warn!("{:#?}", e);
+                warn!("Restart needed error: {:#?}", e);
                 jpc.rotate_node()?;
                 client = jpc.get_client();
                 warn!("Retrying block_chunk")
             }
             Err(Transport(e)) => {
-                warn!("{:#?}", e);
+                warn!("Transport error: {:#?}", e);
                 jpc.rotate_node()?;
                 client = jpc.get_client();
                 warn!("Retrying block_chunk")
@@ -227,7 +227,7 @@ pub async fn catchup_chain(
                 // the hyper http client seems to have issues with http2 streams closing
                 // https://github.com/hyperium/hyper/issues/2500
                 // TODO: There's probably a better way to handle it, I just haven't spent the time
-                error!("{:#?}", e);
+                error!("Unknown error: {:#?}", e);
                 jpc.rotate_node()?;
                 client = jpc.get_client();
             }

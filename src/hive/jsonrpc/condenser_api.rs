@@ -11,9 +11,14 @@
  */
 use jsonrpsee::http_client::HttpClient;
 use jsonrpsee::core::client::{ClientT, Error};
+use jsonrpsee_http_client::transport::HttpBackend;
+use tower_http::compression::Compression;
+use tower_http::decompression::Decompression;
 use crate::hive::jsonrpc::request_params::EmptyParams;
 use crate::hive::jsonrpc::responses::GetDynamicGlobalPropertiesResponse;
 
-pub async fn get_dynamic_global_properties(client: &HttpClient) -> Result<GetDynamicGlobalPropertiesResponse, Error> {
+pub async fn get_dynamic_global_properties(
+    client: &HttpClient<Decompression<Compression<HttpBackend>>>
+) -> Result<GetDynamicGlobalPropertiesResponse, Error> {
     client.request("condenser_api.get_dynamic_global_properties", EmptyParams).await
 }
