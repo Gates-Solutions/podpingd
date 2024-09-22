@@ -22,7 +22,7 @@ use tokio::time::sleep;
 use regex::Regex;
 use tokio::sync::Mutex;
 use crate::hive::jsonrpc::{block_api, condenser_api};
-use crate::hive::jsonrpc::client::{JsonRpcClient, JsonRpcClientImpl};
+use crate::hive::jsonrpc::client::JsonRpcClient;
 use crate::hive::jsonrpc::request_params::GetBlockParams;
 use crate::hive::jsonrpc::responses::{GetBlockResponse, GetDynamicGlobalPropertiesResponse};
 
@@ -41,15 +41,28 @@ pub(crate) struct HiveTransactionWithTxId {
 }
 
 pub(crate) async fn get_dynamic_global_properties(
-    json_rpc_client: Arc<Mutex<JsonRpcClientImpl>>
+    json_rpc_client: Arc<Mutex<impl JsonRpcClient>>
 ) -> Result<GetDynamicGlobalPropertiesResponse, Report> {
-    let jpc = json_rpc_client.lock().await;
-    let client = jpc.get_client();
+    let mut jpc = json_rpc_client.lock().await;
+    let mut client = jpc.get_client();
+    
+    loop {
+        let response: Result<GetDynamicGlobalPropertiesResponse, _> = condenser_api::get_dynamic_global_properties(&client).await;
+        trace!("condenser_api::get_dynamic_global_properties response: {:?}", response);
 
-    let response: Result<GetDynamicGlobalPropertiesResponse, _> = condenser_api::get_dynamic_global_properties(&client).await;
-    trace!("condenser_api::get_dynamic_global_properties response: {:?}", response);
+        match response {
+            Ok(r) => {
+                return Ok(r)
+            },
+            Err(e) => {
+                warn!("get_dynamic_global_properties error: {:#?}", e);
+                jpc.rotate_node()?;
+                client = jpc.get_client();
+                warn!("Retrying get_dynamic_global_properties")
+            }
+        }
 
-    Ok(response?)
+    }
 }
 
 pub fn block_response_to_hive_block(block_num: u64, id_regex: &Regex, response: GetBlockResponse) -> HiveBlockWithNum {
@@ -114,7 +127,7 @@ async fn send_block<S: Send, T: ToOwned<Owned=S>>(tx: &Sender<S>, block: T) {
             Ok(_) => break,
             Err(e) => {
                 warn!("Scanner send error {}", e);
-                sleep(Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(10)).await;
             }
         }
     }
@@ -166,7 +179,7 @@ pub async fn catchup_chain(
     start_block: u64,
     end_block: u64,
     tx: Sender<Vec<HiveBlockWithNum>>,
-    json_rpc_client: Arc<Mutex<JsonRpcClientImpl>>,
+    json_rpc_client: Arc<Mutex<impl JsonRpcClient>>,
 ) -> Result<(), Report> {
     let mut jpc = json_rpc_client.lock().await;
     let mut client = jpc.get_client();
@@ -240,7 +253,7 @@ pub async fn catchup_chain(
 pub async fn scan_chain(
     start_block: u64,
     tx: Sender<HiveBlockWithNum>,
-    json_rpc_client: Arc<Mutex<JsonRpcClientImpl>>,
+    json_rpc_client: Arc<Mutex<impl JsonRpcClient>>,
 ) -> Result<(), Report> {
     let mut jpc = json_rpc_client.lock().await;
     let mut client = jpc.get_client();
@@ -286,6 +299,8 @@ pub async fn scan_chain(
                 warn!("Parse error {}", e);
                 jpc.rotate_node()?;
                 client = jpc.get_client();
+                // This is usually because the requested block doesn't exist yet, so sleep a little
+                sleep(Duration::from_millis(500)).await;
                 warn!("Retrying block {}", block_num)
             }
             Err(RestartNeeded(e)) => {

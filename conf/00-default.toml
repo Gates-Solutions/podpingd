@@ -2,7 +2,6 @@
 # If you want to make changes, copy this file somewhere and set
 # an environment variable PODPINGD_CONFIG_FILE=<your-file-path.yaml>
 debug = false
-data_directory = "./data"
 
 [scanner]
 rpc_nodes = [
@@ -15,7 +14,7 @@ rpc_nodes = [
     "https://rpc.ecency.com",
 ]
 # If both start_block and start_datetime are set, start_block takes precedence
-# If {{data_directory}}/last_updated_block exists, both of these values are ignored
+# If last_updated_block exists in the writer, both of these values are ignored
 # If none of the above, default to the current block
 
 # This is the first Podping block as an example
@@ -25,3 +24,28 @@ rpc_nodes = [
 
 # ISO-8601 datetime of approximately when to start
 #start_datetime = "2024-09-15T00:00:00-0600"
+
+[writer]
+enabled = true
+
+# If the writer is disabled, disable warnings about lack of persistence
+# Keep this off unless you know what you're doing
+disable_persistence_warnings = false
+
+type = "disk"
+#type = "object_storage"
+
+# Settings for type "disk"
+disk_directory = "./data"
+# Enable to trim data older than the given duration
+disk_trim_old = false
+# Duration format defined here
+# https://docs.rs/humantime/latest/humantime/fn.parse_duration.html
+# Note that years and months are *not* calendar based
+disk_trim_keep_duration = "1month"
+
+# Settings for type "object_storage"
+object_storage_base_url = ""
+object_storage_bucket_name = ""
+object_storage_access_key = ""
+object_storage_access_secret = ""

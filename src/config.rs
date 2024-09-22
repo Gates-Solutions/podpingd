@@ -10,12 +10,12 @@
  *     You should have received a copy of the GNU Lesser General Public License along with podpingd. If not, see <https://www.gnu.org/licenses/>.
  */
 use std::path::Path;
+use std::time::Duration;
 use chrono::{DateTime, Utc};
 use config::{Config, File};
 use serde::Deserialize;
 
 pub(crate) const CARGO_PKG_VERSION: Option<&'static str> = option_env!("CARGO_PKG_VERSION");
-
 
 #[derive(Debug, Deserialize)]
 pub struct Scanner {
@@ -25,11 +25,37 @@ pub struct Scanner {
 }
 
 #[derive(Debug, Deserialize)]
+pub enum WriterType {
+    Disk,
+    ObjectStorage
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Writer {
+    pub(crate) enabled: bool,
+    pub(crate) disable_persistence_warnings: bool,
+    
+    #[serde(rename = "type")]
+    pub(crate) type_: Option<WriterType>,
+
+    pub(crate) disk_directory: Option<String>,
+    pub(crate) disk_trim_old: Option<bool>,
+    #[serde(with = "humantime_serde")]
+    pub(crate) disk_trim_keep_duration: Option<Duration>,
+
+
+    pub(crate) object_storage_base_url: Option<String>,
+    pub(crate) object_storage_bucket_name: Option<String>,
+    pub(crate) object_storage_access_key: Option<String>,
+    pub(crate) object_storage_access_secret: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[allow(unused)]
 pub struct Settings {
     pub(crate) debug: bool,
-    pub(crate) data_directory: String,
     pub(crate) scanner: Scanner,
+    pub(crate) writer: Writer,
 }
 
 
